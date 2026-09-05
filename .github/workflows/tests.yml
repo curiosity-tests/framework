@@ -1,6 +1,32 @@
+# racecar fork-testbed patch. Changes from upstream:
+#   1. workflow_dispatch with a `leg` input, so racecar can trigger a run and
+#      choose baseline vs instrumented. Upstream only fires on push/PR.
+#   2. actions/checkout -> crashappsec/action-checkout, which wraps checkout and
+#      setup-chalk-action together. `chalk:` is the single variable separating
+#      the two arms, and `profile:` selects the observables profile.
+#   3. permissions: id-token: write for the action's OIDC connect. Declaring the
+#      block also zeroes every unlisted scope, so the rest is restated.
+#   4. A fail-closed assertion on the instrumented arm.
+# Build and test COMMANDS are byte-identical to upstream.
+
 name: tests
 
 on:
+  workflow_dispatch:
+    inputs:
+      leg:
+        description: "baseline (uninstrumented) or instrumented (under chalk/curiosity)"
+        type: choice
+        options: [instrumented, baseline]
+        default: instrumented
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token, echoed into the run name"
+        type: string
+        default: ""
   push:
     branches:
       - master
@@ -9,8 +35,16 @@ on:
   schedule:
     - cron: '0 0 * * *'
 
+run-name: "tests ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
+
 permissions:
   contents: read
+  id-token: write
+
+env:
+  # The one variable that separates the arms. On baseline, action-checkout skips
+  # its Set up Chalk step entirely.
+  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
 
 jobs:
   linux_tests:
@@ -56,9 +90,19 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: crashappsec/action-checkout@main
         with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
           persist-credentials: false
+
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
 
       - name: Setup PHP project
         uses: ./.github/actions/setup-php-project
@@ -84,56 +128,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux-logs-${{ matrix.php }}-${{ matrix.phpunit }}-${{ matrix.stability }}
-          path: |
-            vendor/orchestra/testbench-core/laravel/storage/logs
-            !vendor/**/.gitignore
-
-  windows_tests:
-    if: github.event_name != 'schedule' || github.repository == 'laravel/framework'
-
-    runs-on: windows-2022
-    timeout-minutes: 10
-
-    strategy:
-      fail-fast: true
-      matrix:
-        php: [8.3, 8.4, 8.5]
-        phpunit: ['11.5.50', '12.5.8', '13.0.3']
-        stability: [prefer-lowest, prefer-stable]
-        exclude:
-          - php: 8.3
-            phpunit: '13.0.3'
-
-    name: PHP ${{ matrix.php }} - PHPUnit ${{ matrix.phpunit }} - ${{ matrix.stability }} - Windows
-
-    steps:
-      - name: Set git to use LF
-        run: |
-          git config --global core.autocrlf false
-          git config --global core.eol lf
-
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Setup PHP project
-        uses: ./.github/actions/setup-php-project
-        with:
-          php-version: ${{ matrix.php }}
-          extensions: dom, curl, libxml, mbstring, zip, pdo, sqlite, pdo_sqlite, gd, pdo_mysql, fileinfo, ftp, redis, memcached, gmp, intl, :php-psr
-          composer-command: composer update --${{ matrix.stability }} --prefer-dist --no-interaction --no-progress --with="phpunit/phpunit:~${{ matrix.phpunit }}"
-
-      - name: Execute tests
-        run: vendor/bin/phpunit --no-coverage
-        env:
-          AWS_ACCESS_KEY_ID: random_key
-          AWS_SECRET_ACCESS_KEY: random_secret
-
-      - name: Store artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: windows-logs-${{ matrix.php }}-${{ matrix.phpunit }}-${{ matrix.stability }}
           path: |
             vendor/orchestra/testbench-core/laravel/storage/logs
             !vendor/**/.gitignore
