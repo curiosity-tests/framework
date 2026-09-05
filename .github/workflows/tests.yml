@@ -77,7 +77,11 @@ jobs:
           - 8888:8000
 
     strategy:
-      fail-fast: true
+      # racecar measurement integrity (not a build change): a flaky leg must not
+      # cancel its siblings. The instrumented arm carries strictly more failure
+      # surface than baseline, so fail-fast drops instrumented legs more often
+      # and biases any arm-vs-arm comparison in baseline's favour.
+      fail-fast: false
       matrix:
         php: [8.3, 8.4, 8.5]
         phpunit: ['11.5.50', '12.5.8', '13.0.3']
