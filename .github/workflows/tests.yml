@@ -48,7 +48,7 @@ env:
 
 jobs:
   linux_tests:
-    if: ${{ 'push' != 'schedule' || github.repository == 'curiosity-tests/framework' }}
+    if: ${{ 'push' != 'schedule' || github.repository == 'laravel/framework' }}
 
     runs-on: ubuntu-24.04
     timeout-minutes: 10
