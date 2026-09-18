@@ -29,11 +29,11 @@ on:
         default: ""
   push:
     branches:
-      - master
-      - '*.x'
+    - master
+    - '*.x'
   pull_request:
   schedule:
-    - cron: '0 0 * * *'
+  - cron: '0 0 * * *'
 
 run-name: "tests ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
 
@@ -57,24 +57,24 @@ jobs:
       memcached:
         image: memcached:1.6-alpine
         ports:
-          - 11211:11211
+        - 11211:11211
       mysql:
         image: mysql:9.7
         env:
           MYSQL_ALLOW_EMPTY_PASSWORD: yes
           MYSQL_DATABASE: forge
         ports:
-          - 3306
+        - 3306
         options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
       redis:
         image: redis:7.0
         ports:
-          - 6379:6379
+        - 6379:6379
         options: --entrypoint redis-server
       dynamodb:
         image: amazon/dynamodb-local:2.0.0
         ports:
-          - 8888:8000
+        - 8888:8000
 
     strategy:
       # racecar measurement integrity (not a build change): a flaky leg must not
@@ -87,51 +87,122 @@ jobs:
         phpunit: ['11.5.50', '12.5.8', '13.0.3']
         stability: [prefer-lowest, prefer-stable]
         exclude:
-          - php: 8.3
-            phpunit: '13.0.3'
+        - php: 8.3
+          phpunit: '13.0.3'
 
     name: PHP ${{ matrix.php }} - PHPUnit ${{ matrix.phpunit }} - ${{ matrix.stability }}
 
     steps:
-      - name: Checkout code
-        uses: crashappsec/action-checkout@e9ff46a65f6403d9d88b87d248c3dfa41550ec75
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          observables_continue_on_error: false
-          lfs: false
-          persist-credentials: false
+    - name: Checkout code
+      uses: crashappsec/action-checkout@e9ff46a65f6403d9d88b87d248c3dfa41550ec75
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
+        persist-credentials: false
 
-      - name: Assert instrumentation is live
-        if: env.CHALK_ON == 'true'
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
-          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+    - name: Setup PHP project
+      uses: ./.github/actions/setup-php-project
+      with:
+        php-version: ${{ matrix.php }}
+        extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite, gd, redis, igbinary, msgpack, memcached, gmp, :php-psr
+        ini-values: error_reporting=E_ALL
+        redis-configure-opts: --enable-redis --enable-redis-igbinary --enable-redis-msgpack --enable-redis-lzf --with-liblzf --enable-redis-zstd --with-libzstd --enable-redis-lz4 --with-liblz4
+        redis-libs: liblz4-dev, liblzf-dev, libzstd-dev
+        composer-command: composer update --${{ matrix.stability }} --prefer-dist --no-interaction --no-progress --with="phpunit/phpunit:~${{ matrix.phpunit }}"
 
-      - name: Setup PHP project
-        uses: ./.github/actions/setup-php-project
-        with:
-          php-version: ${{ matrix.php }}
-          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite, gd, redis, igbinary, msgpack, memcached, gmp, :php-psr
-          ini-values: error_reporting=E_ALL
-          redis-configure-opts: --enable-redis --enable-redis-igbinary --enable-redis-msgpack --enable-redis-lzf --with-liblzf --enable-redis-zstd --with-libzstd --enable-redis-lz4 --with-liblz4
-          redis-libs: liblz4-dev, liblzf-dev, libzstd-dev
-          composer-command: composer update --${{ matrix.stability }} --prefer-dist --no-interaction --no-progress --with="phpunit/phpunit:~${{ matrix.phpunit }}"
+    - name: Execute tests
+      run: vendor/bin/phpunit --display-deprecation ${{ matrix.stability == 'prefer-stable' && '--fail-on-deprecation' || '' }} --no-coverage
+      env:
+        DB_PORT: ${{ job.services.mysql.ports[3306] }}
+        DB_USERNAME: root
+        DYNAMODB_CACHE_TABLE: laravel_dynamodb_test
+        DYNAMODB_ENDPOINT: "http://localhost:8888"
+        AWS_ACCESS_KEY_ID: randomKey
+        AWS_SECRET_ACCESS_KEY: randomSecret
 
-      - name: Execute tests
-        run: vendor/bin/phpunit --display-deprecation ${{ matrix.stability == 'prefer-stable' && '--fail-on-deprecation' || '' }} --no-coverage
-        env:
-          DB_PORT: ${{ job.services.mysql.ports[3306] }}
-          DB_USERNAME: root
-          DYNAMODB_CACHE_TABLE: laravel_dynamodb_test
-          DYNAMODB_ENDPOINT: "http://localhost:8888"
-          AWS_ACCESS_KEY_ID: randomKey
-          AWS_SECRET_ACCESS_KEY: randomSecret
+    - name: Store artifacts
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   # v7.0.1
+      with:
+        name: linux-logs-${{ matrix.php }}-${{ matrix.phpunit }}-${{ matrix.stability }}
+        path: |
+          vendor/orchestra/testbench-core/laravel/storage/logs
+          !vendor/**/.gitignore
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
 
-      - name: Store artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: linux-logs-${{ matrix.php }}-${{ matrix.phpunit }}-${{ matrix.stability }}
-          path: |
-            vendor/orchestra/testbench-core/laravel/storage/logs
-            !vendor/**/.gitignore
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
+
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
+          fi
+        done
+
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
+
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
+          fi
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
